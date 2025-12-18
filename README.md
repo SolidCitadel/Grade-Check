@@ -1,83 +1,75 @@
-# 경희대학교 성적 확인 알림 봇 🎓
- 
- 경희대학교 포털(Info21)을 주기적으로 확인하여, 성적이 입력되거나 변경되면 **Discord**로 알림을 보내주는 파이썬 자동화 프로그램입니다.
- 
- ## 주요 기능 ✨
- 
- - **자동 로그인**: Info21 포털에 자동으로 로그인합니다.
- - **성적 모니터링**: '금학기 성적 조회' 페이지를 주기적으로 확인합니다.
- - **스마트 감지**: 
-   - 성적 입력 란이 **"미입력"**에서 **"입력"**으로 바뀌거나
-   - 등급이 **"-"**에서 실제 등급(**A+, B0 등**)으로 바뀌는 순간을 포착합니다.
- - **Discord 알림**: 성적 변동이 감지되면 즉시 Discord로 알림을 보냅니다.
- - **백그라운드 실행**: 설정한 주기마다 조용히 실행됩니다.
- 
- ## 설치 방법 📦
- 
- ### 1. 필요 프로그램 설치
- - **Chrome 브라우저**가 설치되어 있어야 합니다.
- - **Python 3.9** 이상이 설치되어 있어야 합니다.
- - **Poetry** (패키지 매니저)가 설치되어 시 좋습니다. (없으면 pip 사용 가능)
- 
- ### 2. 프로젝트 설정
- 
- ```bash
- # 저장소 클론 또는 다운로드
- git clone [REPO_URL]
- cd Grade-Check
- 
- # 의존성 설치
- poetry install
- ```
- 
- ### 3. 환경변수 설정 (`.env`)
- 
- `.env.example` 파일을 복사하여 `.env` 파일을 만들고 아래 내용을 채워주세요:
- 
- ```env
- # 경희대학교 포털 URL (변경 불필요)
- LOGIN_URL=https://info21.khu.ac.kr/com/LoginCtr/login.do?sso=ok
- GRADE_URL=https://portal.khu.ac.kr/haksa/clss/scre/tyScre/index.do
- 
- # 로그인 정보 (필수)
- PORTAL_ID=학번(아이디)
- PASSWORD=포털비밀번호
- 
- # Discord Webhook URL (알림을 받으려면 필수)
- DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
- 
- # 확인 주기 (분 단위)
- CHECK_INTERVAL=30
- ```
- 
- > **💡 Discord Webhook URL 얻는 법**
- > 1. 디스코드 서버 설정 -> 연동 -> 웹후크
- > 2. 새 웹후크 생성 -> URL 복사
- 
- ## 실행 방법 🚀
- 
- ```bash
- # 봇 실행
- poetry run python grade_checker.py
- ```
- 
- 실행하면:
- 1. 처음에 현재 성적 상태를 스캔하여 `grades_history.json`에 저장합니다.
- 2. 이후 설정한 주기(기본 30분)마다 성적을 다시 확인합니다.
- 3. 변동 사항(성적 입력 등)이 있으면 Discord로 알림을 보냅니다.
- 
- ## 주의사항 ⚠️
- 
- - **비밀번호 보안**: `.env` 파일에는 실제 비밀번호가 포함되므로 절대 다른 사람에게 공유하거나 GitHub에 올리지 마세요.
- - **확인 주기**: 학교 서버 부하 방지를 위해 주기를 너무 짧게(10분 미만) 설정하지 않는 것을 권장합니다.
- - **로그인 오류**: 비밀번호가 틀리거나 2차 인증(OTP)이 필요한 계정은 사용이 어려울 수 있습니다.
- 
- ## 문제 해결
- 
- - **로그인이 안 돼요**: 아이디/비밀번호가 맞는지, 직접 브라우저로 접속해봐서 팝업 등이 뜨는지 확인해보세요.
- - **알림이 안 와요**: `DISCORD_WEBHOOK_URL`이 정확한지 확인하세요.
- - **실행 중 꺼져요**: 인터넷 연결 상태를 확인해주세요.
- 
- ## 라이선스
- 
- MIT License
+# 🎓 경희대학교 성적 확인 알림 봇
+
+Info21 포털을 주기적으로 모니터링하여 **성적 변동(미입력 -> 입력, 등급 변경)** 발생 시 **Discord**로 알림을 보내주는 봇입니다.
+
+## ✨ 주요 기능
+- **자동 로그인**: Info21 포털에 자동 접속 (Headless 모드 지원)
+- **실시간 감지**: 성적 입력/수정 즉시 감지 (A+ 등급 확인 가능)
+- **Discord 알림**: 변동 사항 발생 시 즉시 푸시 알림 전송
+- **Docker 지원**: 서버에 쉽게 배포하여 24시간 가동 가능
+
+---
+
+## 🚀 빠른 시작 (Docker, 권장)
+
+서버(EC2, NAS 등)에서 가장 간편하게 실행하는 방법입니다.
+
+1. **설정 파일 준비**
+   `.env.example`을 `.env`로 복사하고 학번, 비밀번호, 웹훅 URL을 입력하세요.
+   ```bash
+   cp .env.example .env
+   vi .env
+   ```
+
+2. **실행**
+   ```bash
+   docker-compose up -d
+   ```
+
+3. **로그 확인**
+   ```bash
+   docker-compose logs -f
+   ```
+
+---
+
+## 💻 로컬에서 실행 (개발용)
+
+**필수 요구사항**: Python 3.9+, Chrome 브라우저
+
+1. **설치**
+   ```bash
+   git clone [REPO_URL]
+   cd Grade-Check
+   poetry install  # 또는 pip install -r requirements.txt
+   ```
+
+2. **설정**
+   `.env` 파일을 생성하고 정보를 입력하세요. (위 Docker 방식과 동일)
+
+3. **실행**
+   ```bash
+   poetry run python grade_checker.py
+   ```
+
+---
+
+## ⚙️ 설정 (`.env`)
+
+| 변수명 | 설명 | 비고 |
+|:---:|:---|:---|
+| `LOGIN_URL` | Info21 로그인 주소 | 변경 X |
+| `GRADE_URL` | 금학기 성적 조회 주소 | 변경 X |
+| `PORTAL_ID` | 학번 | 필수 |
+| `PASSWORD` | 포털 비밀번호 | 필수 |
+| `DISCORD_WEBHOOK_URL` | 디스코드 웹훅 주소 | 필수 (알림용) |
+| `CHECK_INTERVAL` | 확인 주기 (분) | 기본 30분 |
+
+## ❓ 문제 해결
+
+- **로그인 실패**: 비밀번호가 맞는지, 2차 인증이 필요한 계정이 아닌지 확인하세요.
+- **성적 테이블 미감지**: 인터넷 속도가 느린 경우 `grade_checker.py`의 `WebDriverWait` 시간을 늘려보세요.
+- **headless 모드**: 서버 환경에서는 `headless=True`로 동작합니다. 로컬 디버깅 시 `False`로 변경하면 브라우저 화면을 볼 수 있습니다.
+
+## License
+MIT License

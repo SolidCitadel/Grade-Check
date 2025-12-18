@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  grade-checker:
+    build: .
+    container_name: khu-grade-checker
+    restart: unless-stopped
+    volumes:
+      # 성적 기록 파일을 유지하기 위해 호스트와 공유
+      - ./grades_history.json:/app/grades_history.json
+    # .env 파일 로드
+    env_file:
+      - .env
+    environment:
+      # Docker 내부에서는 무조건 Headless 모드로 동작해야 함 (코드에서 헤드리스가 True여야 함)
+      - PYTHONUNBUFFERED=1
+    # 로그 크기 제한
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
