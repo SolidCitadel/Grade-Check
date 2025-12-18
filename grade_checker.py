@@ -228,13 +228,15 @@ class GradeChecker:
                 prev_status = prev['status']
                 
                 # 감지 조건:
-                # 1. '미입력' -> '입력' (또는 다른 상태)
-                # 2. 등급이 '-' -> 실제 등급 (예: 'A+')
+                # 1. 상태가 변경된 경우 (예: '미입력' -> '입력')
+                # 2. 등급이 변경된 경우 (예: '-' -> 'A+', 또는 'A' -> 'A+')
+                status_changed = (prev_status != curr_status)
+                grade_changed = (prev['grade'] != curr_grade)
                 
-                status_changed = (prev_status == "미입력" and curr_status != "미입력")
-                grade_appeared = (prev['grade'] == "-" and curr_grade != "-")
-                
-                if status_changed or grade_appeared:
+                if status_changed or grade_changed:
+                    # 변경 사항이 있으면 업데이트 목록에 추가하되,
+                    # 단순 순서 변경 등이 아닌 실제 의미있는 변화인지 로깅
+                    print(f"변동 감지: {subject} | 상태: {prev_status}->{curr_status} | 등급: {prev['grade']}->{curr_grade}")
                     updates.append(curr)
             else:
                 # 새로운 과목 발견 (드문 케이스지만 처리)
