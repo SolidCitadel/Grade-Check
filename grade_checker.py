@@ -28,7 +28,10 @@ class GradeChecker:
         self.webhook_url = os.getenv('DISCORD_WEBHOOK_URL')
         self.headless = headless
         self.driver = None
-        self.history_file = 'grades_history.json'
+        # 데이터 디렉토리 설정 (Docker 마운트 용)
+        self.data_dir = 'data'
+        os.makedirs(self.data_dir, exist_ok=True)
+        self.history_file = os.path.join(self.data_dir, 'grades_history.json')
 
     def setup_driver(self):
         """웹드라이버 설정"""

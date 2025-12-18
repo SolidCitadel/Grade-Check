@@ -1,13 +1,10 @@
-version: '3.8'
-
 services:
   grade-checker:
     build: .
     container_name: khu-grade-checker
-    restart: unless-stopped
     volumes:
-      # 성적 기록 파일을 유지하기 위해 호스트와 공유
-      - ./grades_history.json:/app/grades_history.json
+      # 성적 기록 파일을 유지하기 위해 호스트와 공유 (폴더 마운트)
+      - ./data:/app/data
     # .env 파일 로드
     env_file:
       - .env
