@@ -308,7 +308,7 @@ def main():
         print("오류: .env 파일 설정을 확인해주세요.")
         return
 
-    checker = GradeChecker(headless=False)
+    checker = GradeChecker(headless=True)
     
     # 환경변수에서 주기 읽기
     interval = int(os.getenv('CHECK_INTERVAL', 30))
