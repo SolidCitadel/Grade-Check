@@ -28,27 +28,39 @@ class GradeChecker:
         self.webhook_url = os.getenv('DISCORD_WEBHOOK_URL')
         self.headless = headless
         self.driver = None
-        # 데이터 디렉토리 설정 (Docker 마운트 용)
         self.data_dir = 'data'
         os.makedirs(self.data_dir, exist_ok=True)
         self.history_file = os.path.join(self.data_dir, 'grades_history.json')
+        
+        # 드라이버 이진 파일을 초기화 시 한 번만 설치/확인
+        try:
+            self.driver_path = ChromeDriverManager().install()
+        except Exception as e:
+            print(f"드라이버 설치 실패: {e}")
+            self.driver_path = None
 
     def setup_driver(self):
         """웹드라이버 설정"""
         chrome_options = Options()
 
         if self.headless:
-            chrome_options.add_argument('--headless')
+            # 새로운 헤드리스 모드 사용 (더 안정적)
+            chrome_options.add_argument('--headless=new')
 
         chrome_options.add_argument('--no-sandbox')
         chrome_options.add_argument('--disable-dev-shm-usage')
         chrome_options.add_argument('--disable-blink-features=AutomationControlled')
         chrome_options.add_experimental_option('excludeSwitches', ['enable-logging'])
         
+        # 저사양 환경 최적화 및 안정성 플래그
+        chrome_options.add_argument('--disable-gpu')
+        chrome_options.add_argument('--no-zygote')
+        chrome_options.add_argument('--disk-cache-size=1')
+        
         # 브라우저 창 크기 설정 (반응형 사이트 대응)
         chrome_options.add_argument('--window-size=1920,1080')
 
-        service = Service(ChromeDriverManager().install())
+        service = Service(self.driver_path)
         self.driver = webdriver.Chrome(service=service, options=chrome_options)
         self.driver.implicitly_wait(10)
 
@@ -285,7 +297,12 @@ class GradeChecker:
             if self.login():
                 self.check_grades()
         except Exception as e:
-            print(f"실행 중 오류: {str(e)}")
+            error_msg = f"실행 중 오류: {str(e)}"
+            print(error_msg)
+            try:
+                self.send_discord_notification(f"⚠️ **봇 오류 발생**\n```{str(e)[:1800]}```")
+            except:
+                pass
         finally:
             if self.driver:
                 self.driver.quit()
