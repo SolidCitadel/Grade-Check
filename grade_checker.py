@@ -1,344 +1,285 @@
+"""
+경희대학교 성적 확인 알림 봇 (Playwright / long-lived 세션)
+
+2차 인증(OTP APP 푸시 승인)이 매 로그인마다 필요하고, 인증 세션이 모두
+세션 쿠키(JSESSIONID)라 브라우저를 닫으면 소멸한다. 따라서:
+  - 브라우저를 프로세스 생존 동안 계속 살려둔다(long-lived).
+  - 주기적 성적 페이지 접근이 keep-alive(서버 유휴 만료 리셋) 겸 변동 감지다.
+  - 세션 만료(로그인 페이지로 튕김) 시 자동 재로그인하지 않고 Discord로 알린 뒤
+    부트스트랩 로그인(폰 승인 1회)을 재수행한다.
+"""
 import os
 import time
 import json
-import requests
 from datetime import datetime
+import requests
 from dotenv import load_dotenv
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from webdriver_manager.chrome import ChromeDriverManager
-import schedule
+from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-# 환경변수 로드
 load_dotenv()
 
+
+def ts():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
 class GradeChecker:
-    def __init__(self, headless=True):
-        """
-        경희대학교 성적 확인 자동화 클래스
-        """
-        self.login_url = os.getenv('LOGIN_URL')
-        self.grade_url = os.getenv('GRADE_URL')
-        self.username = os.getenv('PORTAL_ID')
-        self.password = os.getenv('PASSWORD')
-        self.webhook_url = os.getenv('DISCORD_WEBHOOK_URL')
-        self.headless = headless
-        self.driver = None
-        self.data_dir = 'data'
+    def __init__(self):
+        self.login_url = os.getenv("LOGIN_URL")
+        self.grade_url = os.getenv("GRADE_URL")
+        self.username = os.getenv("PORTAL_ID")
+        self.password = os.getenv("PASSWORD")
+        self.webhook_url = os.getenv("DISCORD_WEBHOOK_URL")
+        self.headless = os.getenv("HEADLESS", "true").lower() != "false"
+        self.login_wait_sec = int(os.getenv("LOGIN_WAIT_SEC", "300"))
+
+        self.data_dir = "data"
         os.makedirs(self.data_dir, exist_ok=True)
-        self.history_file = os.path.join(self.data_dir, 'grades_history.json')
-        
-        # 드라이버 이진 파일을 초기화 시 한 번만 설치/확인
+        self.history_file = os.path.join(self.data_dir, "grades_history.json")
+        self.profile_dir = os.path.join(self.data_dir, "pw-profile")
+
+        self._pw = None
+        self.ctx = None
+        self.page = None
+
+    # ------------------------------------------------------------------ #
+    # 브라우저 수명 관리
+    # ------------------------------------------------------------------ #
+    def start_browser(self):
+        self._pw = sync_playwright().start()
+        self.ctx = self._pw.chromium.launch_persistent_context(
+            self.profile_dir,
+            headless=self.headless,
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
+                  "--window-size=1280,950"],
+            viewport={"width": 1280, "height": 900},
+        )
+        self.page = self.ctx.pages[0] if self.ctx.pages else self.ctx.new_page()
+        # 2차인증 발송 시 뜨는 네이티브 alert 자동 확인
+        self.page.on("dialog", lambda d: d.accept())
+        self.page.set_default_timeout(15000)
+
+    def stop_browser(self):
         try:
-            self.driver_path = ChromeDriverManager().install()
-        except Exception as e:
-            print(f"드라이버 설치 실패: {e}")
-            self.driver_path = None
+            if self.ctx:
+                self.ctx.close()
+        finally:
+            if self._pw:
+                self._pw.stop()
 
-    def setup_driver(self):
-        """웹드라이버 설정"""
-        chrome_options = Options()
-
-        if self.headless:
-            # 새로운 헤드리스 모드 사용 (더 안정적)
-            chrome_options.add_argument('--headless=new')
-
-        chrome_options.add_argument('--no-sandbox')
-        chrome_options.add_argument('--disable-dev-shm-usage')
-        chrome_options.add_argument('--disable-blink-features=AutomationControlled')
-        chrome_options.add_experimental_option('excludeSwitches', ['enable-logging'])
-        
-        # 저사양 환경 최적화 및 안정성 플래그
-        chrome_options.add_argument('--disable-gpu')
-        chrome_options.add_argument('--no-zygote')
-        chrome_options.add_argument('--disk-cache-size=1')
-        
-        # 브라우저 창 크기 설정 (반응형 사이트 대응)
-        chrome_options.add_argument('--window-size=1920,1080')
-
-        service = Service(self.driver_path)
-        self.driver = webdriver.Chrome(service=service, options=chrome_options)
-        self.driver.implicitly_wait(10)
-
+    # ------------------------------------------------------------------ #
+    # Discord 알림
+    # ------------------------------------------------------------------ #
     def send_discord_notification(self, message, embed=None):
-        """Discord Webhook으로 알림 전송"""
         if not self.webhook_url:
-            print("⚠️ Discord Webhook URL이 설정되지 않아 알림을 보낼 수 없습니다.")
+            print("⚠️ Discord Webhook URL 미설정 — 알림 생략")
             return
-
         try:
             data = {"content": message}
             if embed:
                 data["embeds"] = [embed]
-            
-            response = requests.post(self.webhook_url, json=data)
-            if response.status_code == 204:
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] Discord 알림 전송 성공")
-            else:
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] Discord 알림 전송 실패: {response.status_code}")
+            r = requests.post(self.webhook_url, json=data, timeout=10)
+            ok = r.status_code == 204
+            print(f"[{ts()}] Discord 알림 {'성공' if ok else f'실패({r.status_code})'}")
         except Exception as e:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] 알림 전송 중 오류: {str(e)}")
+            print(f"[{ts()}] 알림 전송 오류: {e}")
 
-    def login(self):
-        """경희대학교 포털 로그인"""
-        try:
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 로그인 시도 중...")
-            self.driver.get(self.login_url)
-
-            # Alert가 있다면 처리 (가끔 세션 만료 알림 등이 뜰 때 대비)
-            try:
-                alert = self.driver.switch_to.alert
-                alert.accept()
-            except:
-                pass
-
-            # ID 입력
-            username_field = WebDriverWait(self.driver, 10).until(
-                EC.presence_of_element_located((By.ID, "userId"))
-            )
-            username_field.clear()
-            time.sleep(0.5)
-            username_field.send_keys(self.username)
-
-            # PW 입력
-            password_field = self.driver.find_element(By.ID, "userPw")
-            password_field.clear()
-            time.sleep(0.5)
-            password_field.send_keys(self.password)
-            time.sleep(0.5)
-
-            # 로그인 버튼 클릭
-            login_button = self.driver.find_element(By.CSS_SELECTOR, "button.loginbtn1")
-            login_button.click()
-
-            # 로그인 실패 Alert 확인 (비밀번호 틀림 등)
-            try:
-                WebDriverWait(self.driver, 3).until(EC.alert_is_present())
-                alert = self.driver.switch_to.alert
-                error_msg = alert.text
-                print(f"⚠️ 로그인 경고 창 감지: {error_msg}")
-                alert.accept()
-                return False
-            except:
-                # Alert가 없으면 로그인 성공으로 간주하고 진행
-                pass
-
-            # 로그인 완료 및 리다이렉트 대기
-            time.sleep(5)
-            
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 로그인 성공")
+    # ------------------------------------------------------------------ #
+    # 로그인 상태 판별
+    # ------------------------------------------------------------------ #
+    def _on_login_page(self):
+        url = (self.page.url or "").lower()
+        if "loginctr/login" in url or "login.do" in url:
             return True
+        return self.page.locator("#userId").count() > 0
 
+    # ------------------------------------------------------------------ #
+    # 부트스트랩 로그인 (반자동: 봇이 끌고, 폰 승인은 사용자가)
+    # ------------------------------------------------------------------ #
+    def login(self):
+        print(f"[{ts()}] 로그인 시도")
+        try:
+            self.page.goto(self.login_url, wait_until="domcontentloaded")
+            self.page.wait_for_selector("#userId", timeout=15000)
+            self.page.keyboard.press("Escape")  # 공지 팝업 있으면 닫기(없어도 무해)
+
+            self.page.fill("#userId", self.username)
+            self.page.fill("#userPw", self.password)
+            self.page.locator("button.btn_login:visible", has_text="로그인").first.click()
+
+            # 2차인증 다이얼로그(인증방법 select) 대기
+            self.page.locator("select:visible").first.wait_for(state="visible", timeout=15000)
+            self.page.locator("select:visible").first.select_option(label="OTP APP")
+            time.sleep(0.5)
+            self.page.locator("button:visible", has_text="Push 발송").first.click()
+
+            self.send_discord_notification(
+                "📲 **2차 인증 필요** — 경희대 OTP앱(KHU-OTP) 알림에서 **승인**을 눌러주세요.")
+            print(f"[{ts()}] 📲 폰 승인 대기 (최대 {self.login_wait_sec}초)")
+
+            deadline = time.time() + self.login_wait_sec
+            first = True
+            while time.time() < deadline:
+                time.sleep(14 if first else 8)
+                first = False
+                try:
+                    self.page.locator(".ui-dialog:visible").locator(
+                        "button:has-text('로그인')").first.click(timeout=3000)
+                except Exception:
+                    pass  # 다이얼로그가 이미 닫혔거나(승인 완료 직후) 미출현
+                time.sleep(2.5)
+                url = (self.page.url or "").lower()
+                if "portal.khu.ac.kr" in url and "login" not in url:
+                    print(f"[{ts()}] ✅ 로그인 성공")
+                    self.send_discord_notification("✅ 로그인 완료 — 성적 모니터링을 재개합니다.")
+                    return True
+
+            print(f"[{ts()}] ❌ 로그인 시간 초과")
+            self.send_discord_notification("⚠️ 재로그인 시간 초과 — 다음 주기에 다시 시도합니다.")
+            return False
         except Exception as e:
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 로그인 실패: {str(e)}")
-            self.driver.save_screenshot('login_error.png')
+            print(f"[{ts()}] 로그인 실패: {e}")
+            self._save_screenshot("login_error.png")
+            self.send_discord_notification(f"⚠️ 로그인 중 오류: {str(e)[:300]}")
             return False
 
+    # ------------------------------------------------------------------ #
+    # 성적 확인
+    # ------------------------------------------------------------------ #
     def check_grades(self):
-        """성적 페이지 확인 및 '미입력' 상태 모니터링"""
+        """성적 페이지 접근 → 만료면 'EXPIRED', 정상 파싱이면 'OK', 오류면 'ERROR'."""
         try:
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 성적 페이지 이동 중...")
-            self.driver.get(self.grade_url)
+            self.page.goto(self.grade_url, wait_until="domcontentloaded")
+            time.sleep(1)
+            if self._on_login_page():
+                print(f"[{ts()}] 세션 만료 감지(로그인 페이지로 리다이렉트)")
+                return "EXPIRED"
 
-            # 성적 테이블 로딩 대기 (최대 30초)
             try:
-                print("성적 테이블 로딩 대기 중 (div#cont1 table.t_list)...")
-                WebDriverWait(self.driver, 30).until(
-                    EC.visibility_of_element_located((By.CSS_SELECTOR, "div#cont1 table.t_list"))
-                )
-                time.sleep(1) # 렌더링 안정화
-            except Exception as e:
-                print(f"테이블 로딩 대기 중 오류 또는 타임아웃: {str(e)}")
-                # 타임아웃 시 소스 저장
-                try:
-                    with open("debug_page_source_timeout.html", "w", encoding="utf-8") as f:
-                        f.write(self.driver.page_source)
-                    print("디버그용 페이지 소스를 debug_page_source_timeout.html로 저장했습니다.")
-                except:
-                    pass
+                self.page.wait_for_selector("div#cont1 table.t_list", timeout=30000)
+                time.sleep(1)
+            except PWTimeout:
+                print(f"[{ts()}] 성적 테이블 로딩 타임아웃")
+                self._save_screenshot("grade_timeout.png")
+                return "ERROR"
 
-            # 성적 테이블 행 파싱 (구체적인 셀렉터 사용)
-            grade_rows = self.driver.find_elements(By.CSS_SELECTOR, "div#cont1 table.t_list tbody tr")
-            
-            if not grade_rows:
-                print("성적 테이블 행을 찾을 수 없습니다.")
-                # 행을 못 찾았을 때도 소스 저장
-                try:
-                    with open("debug_page_source_not_found.html", "w", encoding="utf-8") as f:
-                        f.write(self.driver.page_source)
-                    print("디버그용 페이지 소스를 debug_page_source_not_found.html로 저장했습니다.")
-                except:
-                    pass
-                return False
+            rows = self.page.locator("div#cont1 table.t_list tbody tr")
+            n = rows.count()
+            print(f"[{ts()}] 발견된 행: {n}")
 
             current_grades = []
-            
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] 발견된 행 개수: {len(grade_rows)}")
-
-            for row in grade_rows:
+            for i in range(n):
+                row = rows.nth(i)
+                if row.locator("td[data-mb='교과목']").count() == 0:
+                    continue  # 헤더 행 등 제외
                 try:
-                    # 데이터 유효성 검증 (헤더 행 제외)
-                    cells = row.find_elements(By.CSS_SELECTOR, "td[data-mb='교과목']")
-                    if not cells:
-                        continue
-
-                    # 각 셀 데이터 추출
-                    subject = cells[0].text.strip()
-                    grade = row.find_element(By.CSS_SELECTOR, "td[data-mb='등급']").text.strip()
-                    status = row.find_element(By.CSS_SELECTOR, "td[data-mb='성적입력']").text.strip()
-                    
-                    grade_info = {
-                        "subject": subject,
-                        "grade": grade,
-                        "status": status
-                    }
-                    current_grades.append(grade_info)
-                    
-                    print(f"- {subject}: {grade} ({status})")
-
-                except Exception as e:
-                    # print(f"행 파싱 중 오류: {str(e)}")
+                    subject = row.locator("td[data-mb='교과목']").first.inner_text().strip()
+                    grade = row.locator("td[data-mb='등급']").first.inner_text().strip()
+                    status = row.locator("td[data-mb='성적입력']").first.inner_text().strip()
+                except Exception:
                     continue
+                current_grades.append({"subject": subject, "grade": grade, "status": status})
+                print(f"- {subject}: {grade} ({status})")
 
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] 총 {len(current_grades)}개 과목 유효 데이터 확인됨")
-
-            # 변경사항 확인 및 알림 트리거
+            print(f"[{ts()}] 유효 과목 {len(current_grades)}개")
             self.process_grade_updates(current_grades)
-            
-            return True
-
+            return "OK"
         except Exception as e:
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 성적 확인 실패: {str(e)}")
-            self.driver.save_screenshot('grade_check_error.png')
-            return False
+            print(f"[{ts()}] 성적 확인 실패: {e}")
+            self._save_screenshot("grade_error.png")
+            return "ERROR"
 
     def process_grade_updates(self, current_grades):
-        """이전 성적과 비교하여 업데이트 확인"""
         if not os.path.exists(self.history_file):
-            # 첫 실행 시 기록만 저장
             self.save_history(current_grades)
-            print("첫 실행: 현재 상태를 저장했습니다.")
-            self.send_discord_notification("👋 성적 알림 봇이 시작되었습니다.\n현재 성적 상태가 저장되었습니다.")
+            print("첫 실행: 현재 상태 저장")
+            self.send_discord_notification("👋 성적 알림 봇 시작 — 현재 성적 상태를 저장했습니다.")
             return
 
-        with open(self.history_file, 'r', encoding='utf-8') as f:
+        with open(self.history_file, "r", encoding="utf-8") as f:
             previous_grades = json.load(f)
+        prev_dict = {g["subject"]: g for g in previous_grades}
 
-        # 딕셔너리로 변환하여 비교 용이하게 함 (Subject -> Info)
-        prev_dict = {g['subject']: g for g in previous_grades}
-        
         updates = []
-        
         for curr in current_grades:
-            subject = curr['subject']
-            curr_status = curr['status']
-            curr_grade = curr['grade']
-            
+            subject = curr["subject"]
             if subject in prev_dict:
                 prev = prev_dict[subject]
-                prev_status = prev['status']
-                
-                # 감지 조건:
-                # 1. 상태가 변경된 경우 (예: '미입력' -> '입력')
-                # 2. 등급이 변경된 경우 (예: '-' -> 'A+', 또는 'A' -> 'A+')
-                status_changed = (prev_status != curr_status)
-                grade_changed = (prev['grade'] != curr_grade)
-                
-                if status_changed or grade_changed:
-                    # 변경 사항이 있으면 업데이트 목록에 추가하되,
-                    # 단순 순서 변경 등이 아닌 실제 의미있는 변화인지 로깅
-                    print(f"변동 감지: {subject} | 상태: {prev_status}->{curr_status} | 등급: {prev['grade']}->{curr_grade}")
+                if prev["status"] != curr["status"] or prev["grade"] != curr["grade"]:
+                    print(f"변동 감지: {subject} | {prev['status']}->{curr['status']} | "
+                          f"{prev['grade']}->{curr['grade']}")
                     updates.append(curr)
             else:
-                # 새로운 과목 발견 (드문 케이스지만 처리)
-                if curr['status'] != "미입력" and curr['grade'] != "-":
+                if curr["status"] != "미입력" and curr["grade"] != "-":
                     updates.append(curr)
 
         if updates:
-            print(f"🎉 {len(updates)}개의 새로운 성적 업데이트 발견!")
-            
-            embed_fields = []
-            for item in updates:
-                embed_fields.append({
-                    "name": item['subject'],
-                    "value": f"성적: **{item['grade']}**\n상태: {item['status']}",
-                    "inline": False
-                })
-                
+            print(f"🎉 {len(updates)}개 업데이트 발견")
             embed = {
                 "title": "🎉 성적 발표 알림",
                 "description": "새로운 성적이 등록되었습니다!",
-                "color": 5814783,  # Green
-                "fields": embed_fields,
-                "timestamp": datetime.utcnow().isoformat()
+                "color": 5814783,
+                "fields": [{"name": u["subject"],
+                            "value": f"성적: **{u['grade']}**\n상태: {u['status']}",
+                            "inline": False} for u in updates],
+                "timestamp": datetime.utcnow().isoformat(),
             }
-            
             self.send_discord_notification("새로운 성적이 확인되었습니다!", embed)
             self.save_history(current_grades)
         else:
-            print("변동 사항 없음")
+            print("변동 없음")
 
     def save_history(self, grades):
-        """성적 기록 저장"""
         try:
-            with open(self.history_file, 'w', encoding='utf-8') as f:
+            with open(self.history_file, "w", encoding="utf-8") as f:
                 json.dump(grades, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            print(f"기록 저장 실패: {str(e)}")
+            print(f"기록 저장 실패: {e}")
 
-    def run_check(self):
-        """한 번의 확인 사이클 실행"""
+    def _save_screenshot(self, name):
         try:
-            self.setup_driver()
-            if self.login():
-                self.check_grades()
+            self.page.screenshot(path=name)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------ #
+    # 메인 루프 (long-lived)
+    # ------------------------------------------------------------------ #
+    def run(self, interval_minutes=30):
+        print(f"🎓 경희대 성적 확인 봇 시작 | 주기 {interval_minutes}분 | "
+              f"headless={self.headless}")
+        self.start_browser()
+        self.send_discord_notification(
+            f"🤖 봇이 시작되었습니다. {interval_minutes}분마다 성적을 확인합니다.")
+        try:
+            while True:
+                status = self.check_grades()
+                if status == "EXPIRED":
+                    self.send_discord_notification("🔒 세션 만료 — 재로그인이 필요합니다.")
+                    if self.login():
+                        self.check_grades()  # 재로그인 직후 즉시 재확인
+                time.sleep(interval_minutes * 60)
+        except KeyboardInterrupt:
+            print("\n봇 종료")
         except Exception as e:
-            error_msg = f"실행 중 오류: {str(e)}"
-            print(error_msg)
+            print(f"치명적 오류: {e}")
             try:
-                self.send_discord_notification(f"⚠️ **봇 오류 발생**\n```{str(e)[:1800]}```")
-            except:
+                self.send_discord_notification(f"⚠️ **봇 오류**\n```{str(e)[:1800]}```")
+            except Exception:
                 pass
         finally:
-            if self.driver:
-                self.driver.quit()
+            self.stop_browser()
 
-    def run_scheduled(self, interval_minutes=30):
-        """주기적으로 성적 확인"""
-        print(f"🎓 경희대학교 성적 확인 봇 가동 시작")
-        print(f"⏱️ 확인 주기: {interval_minutes}분")
-        print(f"종료하려면 Ctrl+C를 누르세요.\n")
-
-        # 시작 시 알림
-        self.send_discord_notification(f"🤖 봇이 시작되었습니다. {interval_minutes}분마다 성적을 확인합니다.")
-
-        # 즉시 한 번 실행
-        self.run_check()
-
-        schedule.every(interval_minutes).minutes.do(self.run_check)
-
-        while True:
-            schedule.run_pending()
-            time.sleep(1)
 
 def main():
-    if not all([os.getenv('LOGIN_URL'), os.getenv('PORTAL_ID'), os.getenv('PASSWORD')]):
-        print("오류: .env 파일 설정을 확인해주세요.")
+    if not all([os.getenv("LOGIN_URL"), os.getenv("GRADE_URL"),
+                os.getenv("PORTAL_ID"), os.getenv("PASSWORD")]):
+        print("오류: .env 설정을 확인하세요 (LOGIN_URL/GRADE_URL/PORTAL_ID/PASSWORD).")
         return
+    checker = GradeChecker()
+    interval = int(os.getenv("CHECK_INTERVAL", "30"))
+    checker.run(interval_minutes=interval)
 
-    checker = GradeChecker(headless=True)
-    
-    # 환경변수에서 주기 읽기
-    interval = int(os.getenv('CHECK_INTERVAL', 30))
-    
-    try:
-        checker.run_scheduled(interval_minutes=interval)
-    except KeyboardInterrupt:
-        print("\n봇을 종료합니다.")
 
 if __name__ == "__main__":
     main()

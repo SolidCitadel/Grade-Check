@@ -9,8 +9,11 @@ services:
     env_file:
       - .env
     environment:
-      # Docker 내부에서는 무조건 Headless 모드로 동작해야 함 (코드에서 헤드리스가 True여야 함)
       - PYTHONUNBUFFERED=1
+      # Docker 내부에서는 무조건 헤드리스
+      - HEADLESS=true
+    # 컨테이너가 죽어도 자동 재가동 (단, 세션 쿠키는 휘발이라 재시작 시 재로그인 필요)
+    restart: unless-stopped
     # 로그 크기 제한
     logging:
       driver: "json-file"

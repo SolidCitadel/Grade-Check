@@ -23,3 +23,13 @@ logs/
 
 # Data
 grades_history.json
+
+# 브라우저 프로필 (세션·바이너리 — 커밋 금지)
+data/pw-profile/
+data/chrome-profile/
+
+# 진단/디버그 산출물
+*.png
+login_page_source.html
+cookies_dump.json
+debug_page_source*.html
