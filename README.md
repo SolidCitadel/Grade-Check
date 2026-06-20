@@ -56,8 +56,8 @@ Info21 포털을 주기적으로 모니터링하여 **성적 변동(미입력 ->
    ```bash
    git clone [REPO_URL]
    cd Grade-Check
-   poetry install
-   poetry run playwright install chromium   # 브라우저 1회 설치
+   uv sync                                # 의존성 설치 (.venv 자동 생성)
+   uv run playwright install chromium     # 브라우저 1회 설치
    ```
 
 2. **설정**
@@ -66,7 +66,7 @@ Info21 포털을 주기적으로 모니터링하여 **성적 변동(미입력 ->
 3. **실행**
    ```bash
    # 브라우저 창을 보면서 디버깅하려면 HEADLESS=false
-   HEADLESS=false poetry run python grade_checker.py
+   HEADLESS=false uv run python grade_checker.py
    ```
    시작 직후 Discord로 **"📲 승인하세요"** 알림이 오면 폰에서 승인하세요.
 
